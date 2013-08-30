@@ -6,7 +6,7 @@
 */
 
 #include "json_parsing.h"
-#include "jml/arch/format.h"
+#include "buffers.h"
 
 
 using namespace std;
@@ -92,211 +92,73 @@ void jsonEscape(const std::string & str, std::ostream & stream)
     stream.write(buf, p - buf);
 }
 
-bool matchJsonString(Parse_Context & context, std::string & str)
+template <typename f>
+JML_ALWAYS_INLINE
+void readJsonStringAscii(Parse_Context& context, f&& push_back)
 {
-    Parse_Context::Revert_Token token(context);
+    readJsonString(context, push_back, push_back);
+}
 
-    skipJsonWhitespace(context);
-    if (!context.match_literal('"')) return false;
+auto expectJsonStringAscii(Parse_Context& context) -> string
+{
+    auto result = growing_buffer{};
+    readJsonStringAscii(context, [&](uint16_t c)
+    {
+        if (c > 127)
+            context.exception("non-ASCII string character");
 
-    std::string result;
+        result.push_back(c);
+    });
+    return result;
+}
 
-    while (!context.match_literal('"')) {
-        if (context.eof()) return false;
-        int c = *context++;
-        //if (c < 0 || c >= 127)
-        //    context.exception("invalid JSON string character");
-        if (c != '\\') {
+auto expectJsonStringAsciiPermissive(Parse_Context& context, char replaceWith) -> string
+{
+    auto result = growing_buffer{};
+    readJsonStringAscii(context, [&](uint16_t c)
+    {
+        if (c > 127)
+            c = replaceWith;
+
+        result.push_back(c);
+    });
+    return result;
+}
+
+auto expectJsonStringAscii(Parse_Context& context, char* buffer, size_t maxLength) -> ssize_t
+{
+    try
+    {
+        auto result = external_buffer{buffer, maxLength};
+        readJsonStringAscii(context, [&](uint16_t c)
+        {
+            if (c > 127)
+                context.exception("non-ASCII string character");
+
             result.push_back(c);
-            continue;
-        }
-        c = *context++;
-        switch (c) {
-        case 't': result.push_back('\t');  break;
-        case 'n': result.push_back('\n');  break;
-        case 'r': result.push_back('\r');  break;
-        case 'f': result.push_back('\f');  break;
-        case 'b': result.push_back('\b');  break;
-        case '/': result.push_back('/');   break;
-        case '\\':result.push_back('\\');  break;
-        case '"': result.push_back('"');   break;
-        case 'u': {
-            int code = context.expect_int();
-            if (code<0 || code>255)
-            {
-                return false;
-            }
-            result.push_back(code);
-            break;
-        }
-        default:
-            return false;
-        }
+        });
+        result.push_back(0);
+        return result.pos;
     }
-
-    token.ignore();
-    str = result;
-    return true;
+    catch (out_of_range&)
+    {
+        return -1;
+    }
 }
 
-std::string expectJsonStringAsciiPermissive(Parse_Context & context, char sub)
+auto matchJsonString(Parse_Context& context, string& str) -> bool
 {
-    skipJsonWhitespace(context);
-    context.expect_literal('"');
-
-    char internalBuffer[4096];
-
-    char * buffer = internalBuffer;
-    size_t bufferSize = 4096;
-    size_t pos = 0;
-
-    // Try multiple times to make it fit
-    while (!context.match_literal('"')) {
-        int c = *context++;
-        if (c == '\\') {
-            c = *context++;
-            switch (c) {
-            case 't': c = '\t';  break;
-            case 'n': c = '\n';  break;
-            case 'r': c = '\r';  break;
-            case 'f': c = '\f';  break;
-            case 'b': c = '\b';  break;
-            case '/': c = '/';   break;
-            case '\\':c = '\\';  break;
-            case '"': c = '"';   break;
-            case 'u': {
-                int code = context.expect_int();
-                c = code;
-                break;
-            }
-            default:
-                context.exception("invalid escaped char");
-            }
-        }
-        if (c < ' ' || c >= 127)
-            c = sub;
-        if (pos == bufferSize) {
-            size_t newBufferSize = bufferSize * 8;
-            char * newBuffer = new char[newBufferSize];
-            std::copy(buffer, buffer + bufferSize, newBuffer);
-            if (buffer != internalBuffer)
-                delete[] buffer;
-            buffer = newBuffer;
-            bufferSize = newBufferSize;
-        }
-        buffer[pos++] = c;
+    try
+    {
+        Parse_Context::Revert_Token token{context};
+        str = expectJsonStringAscii(context);
+        token.ignore();
+        return true;
     }
-
-    string result(buffer, buffer + pos);
-    if (buffer != internalBuffer)
-        delete[] buffer;
-    
-    return result;
-}
-
-ssize_t expectJsonStringAscii(Parse_Context & context, char * buffer, size_t maxLength)
-{
-    skipJsonWhitespace(context);
-    context.expect_literal('"');
-
-    size_t bufferSize = maxLength - 1;
-    size_t pos = 0;
-
-    // Try multiple times to make it fit
-    while (!context.match_literal('"')) {
-        int c = *context++;
-        if (c == '\\') {
-            c = *context++;
-            switch (c) {
-            case 't': c = '\t';  break;
-            case 'n': c = '\n';  break;
-            case 'r': c = '\r';  break;
-            case 'f': c = '\f';  break;
-            case 'b': c = '\b';  break;
-            case '/': c = '/';   break;
-            case '\\':c = '\\';  break;
-            case '"': c = '"';   break;
-            case 'u': {
-                int code = context.expect_int();
-                if (code<0 || code>255) {
-                    context.exception(format("non 8bit char %d", code));
-                }
-                c = code;
-                break;
-            }
-            default:
-                context.exception("invalid escaped char");
-            }
-        }
-        if (c < 0 || c >= 127)
-           context.exception("invalid JSON ASCII string character");
-        if (pos == bufferSize) {
-            return -1;
-        }
-        buffer[pos++] = c;
+    catch (exception&)
+    {
+        return false;
     }
-
-    buffer[pos] = 0; // null terminator
-
-    return pos;
-}
-
-std::string expectJsonStringAscii(Parse_Context & context)
-{
-    skipJsonWhitespace(context);
-    context.expect_literal('"');
-
-    char internalBuffer[4096];
-
-    char * buffer = internalBuffer;
-    size_t bufferSize = 4096;
-    size_t pos = 0;
-
-    // Try multiple times to make it fit
-    while (!context.match_literal('"')) {
-        int c = *context++;
-        if (c == '\\') {
-            c = *context++;
-            switch (c) {
-            case 't': c = '\t';  break;
-            case 'n': c = '\n';  break;
-            case 'r': c = '\r';  break;
-            case 'f': c = '\f';  break;
-            case 'b': c = '\b';  break;
-            case '/': c = '/';   break;
-            case '\\':c = '\\';  break;
-            case '"': c = '"';   break;
-            case 'u': {
-                int code = context.expect_int();
-                if (code<0 || code>255) {
-                    context.exception(format("non 8bit char %d", code));
-                }
-                c = code;
-                break;
-            }
-            default:
-                context.exception("invalid escaped char");
-            }
-        }
-        if (c < 0 || c >= 127)
-           context.exception("invalid JSON ASCII string character");
-        if (pos == bufferSize) {
-            size_t newBufferSize = bufferSize * 8;
-            char * newBuffer = new char[newBufferSize];
-            std::copy(buffer, buffer + bufferSize, newBuffer);
-            if (buffer != internalBuffer)
-                delete[] buffer;
-            buffer = newBuffer;
-            bufferSize = newBufferSize;
-        }
-        buffer[pos++] = c;
-    }
-
-    string result(buffer, buffer + pos);
-    if (buffer != internalBuffer)
-        delete[] buffer;
-    
-    return result;
 }
 
 bool

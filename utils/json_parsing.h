@@ -13,6 +13,7 @@
 #include <string>
 #include <functional>
 #include "parse_context.h"
+#include "jml/arch/format.h"
 
 
 namespace ML {
@@ -112,6 +113,61 @@ expectJson(Parse_Context & context)
 }
 
 #endif
+
+JML_ALWAYS_INLINE
+auto fromHex(char hex, Parse_Context & context) -> uint8_t
+{
+    if (hex >= '0' && hex <= '9')
+        return hex - '0';
+    else if (hex >= 'a' && hex <= 'f')
+        return hex - 'a' + 10;
+    else if (hex >= 'A' && hex <= 'F')
+        return hex - 'A' + 10;
+    else
+        context.exception(format("invalid hexadecimal: %c", hex));
+}
+
+template <typename T>
+JML_ALWAYS_INLINE
+auto fromHex(Parse_Context & context) -> T
+{
+    auto code = T{0};
+    for (auto i = 0; i < (2*sizeof(T)); ++i)
+        code = (code << 4) | fromHex(*context++, context);
+    return code;
+}
+
+template <typename f_char, typename f_char16t>
+JML_ALWAYS_INLINE
+void readJsonString(Parse_Context& context, f_char&& push_back_byte, f_char16t&& push_back_utf16)
+{
+    skipJsonWhitespace(context);
+    context.expect_literal('"');
+
+    while (!context.match_literal('"'))
+    {
+        auto c = *context++;
+        if (c != '\\')
+        {
+            push_back_byte(c);
+            continue;
+        }
+
+        c = *context++;
+        switch (c) {
+            case 't': push_back_byte('\t'); break;
+            case 'n': push_back_byte('\n'); break;
+            case 'r': push_back_byte('\r'); break;
+            case 'f': push_back_byte('\f'); break;
+            case 'b': push_back_byte('\b'); break;
+            case '/': push_back_byte('/');  break;
+            case '\\':push_back_byte('\\'); break;
+            case '"': push_back_byte('"');  break;
+            case 'u': push_back_utf16(char16_t(fromHex<uint16_t>(context))); break;
+            default: context.exception(format("invalid escape sequence: \\%c", c));
+        }
+    }
+}
 
 } // namespace ML
 
