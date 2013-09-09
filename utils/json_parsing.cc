@@ -138,7 +138,7 @@ auto expectJsonStringAscii(Parse_Context& context, char* buffer, size_t maxLengt
             result.push_back(c);
         });
         result.push_back(0);
-        return result.pos;
+        return result.pos - 1;
     }
     catch (out_of_range&)
     {
